@@ -1,108 +1,120 @@
 # Wildfire Fire Level Estimation
 
-Sistema de monitoreo inteligente y cuantificación analítica de incendios forestales basado en visión por computadora. El proyecto utiliza **YOLOv26n-seg** para segmentar el fuego a nivel de píxel, calcular el porcentaje de área ocupada por las llamas (*Fire Percentage*) y clasificar la severidad del incendio en niveles discretos (Low, Medium, High, Critical), generando alertas automáticas en tiempo real.
+An intelligent monitoring and analytical quantification system for wildfires based on computer vision. The project uses **YOLOv26n-seg** to segment fire at the pixel level, calculate the percentage of area occupied by flames (*Fire Percentage*), and classify fire severity into discrete levels (Low, Medium, High, Critical), generating automatic real-time alerts.
 
-## ¿Qué hace este proyecto?
+## What does this project do?
 
 ```
-Imagen / Video → Segmentación (YOLOv26n-seg) → Máscara de fuego →
-Conteo de píxeles → Fire Percentage (FP) → Nivel de severidad → Alerta
+Image / Video → Segmentation (YOLOv26n-seg) → Fire mask →
+Pixel count → Fire Percentage (FP) → Severity level → Alert
 ```
 
-**Fórmula central:**
+**Core formula:**
 ```
-FP = (Píxeles de fuego / Píxeles totales de la imagen) × 100
+FP = (Fire pixels / Total pixels in the image) × 100
 ```
 
-## Estructura del repositorio y entorno de ejecución
+## Repository structure and execution environment
 
-⚠️ **Importante:** este proyecto se desarrolló combinando dos entornos distintos, y no todos los scripts corren en el mismo lugar. Antes de ejecutar cualquier archivo, revisa en qué entorno está pensado:
+⚠️ **Important:** this project was developed across two different environments, and not every script runs in the same place. Before running any file, check which environment it was designed for:
 
-| Categoría | Entorno recomendado | Por qué |
+| Category | Recommended environment | Why |
 |---|---|---|
-| Scripts de **descarga y preparación de datasets** | Google Colab | Necesitan descargar datasets grandes (D-Fire, ~5.3GB) y correr SAM sobre GPU; se apoyan en `google.colab.drive` para persistencia en Google Drive |
-| Scripts de **entrenamiento** | Google Colab (GPU) | El modelo se entrenó en Colab (T4 → L4) por la necesidad de GPU; no requieren nada exclusivo de Colab en el código, pero entrenar en CPU local sería extremadamente lento |
-| **Demos e inferencia** (`app.py`, `webcam_demo_firequant.py`) | **Local** (tu computador) | Diseñados para correr en local: la app de Streamlit y la demo de cámara necesitan acceso directo al hardware (webcam) o a un servidor local, no funcionan igual dentro de Colab |
-| `inference_firequant.py` | Ambos | Es agnóstico al entorno; funciona igual en Colab o en local, siempre que tenga la ruta correcta al modelo `best.pt` |
+| **Dataset download and preparation** scripts | Google Colab | They need to download large datasets (D-Fire, ~5.3GB) and run SAM on GPU; they rely on `google.colab.drive` for persistence in Google Drive |
+| **Training** scripts | Google Colab (GPU) | The model was trained in Colab (T4 → L4) due to the GPU requirement; the code itself has no Colab-exclusive dependency, but training on a local CPU would be extremely slow |
+| **Demos and inference** (`app.py`, `webcam_demo_firequant.py`) | **Local** (your computer) | Designed to run locally: the Streamlit app and the webcam demo need direct access to hardware (webcam) or a local server, and don't work the same way inside Colab |
+| `inference_firequant.py` | Both | Environment-agnostic; works the same in Colab or locally, as long as it points to the correct path for `best.pt` |
 
-### Sobre las rutas de Google Drive
+### About Google Drive paths
 
-Varios scripts de descarga/entrenamiento (`download_dfire.py`, `combinar_datasets_firequant.py`, `train_firequant_yolo26.py`) usan rutas del tipo `/content/drive/MyDrive/...`. **Esas rutas solo existen dentro de una sesión de Google Colab con Drive montado** (`from google.colab import drive; drive.mount('/content/drive')`). Si copias estos scripts a tu computador local, tendrás que:
-1. Eliminar o comentar la parte de `drive.mount(...)`.
-2. Cambiar las rutas `/content/drive/MyDrive/...` por una ruta local de tu preferencia (ej. `C:/Users/tu_usuario/firequant_data/...`).
+Several download/training scripts (`download_dfire.py`, `combinar_datasets_firequant.py`, `train_firequant_yolo26.py`) use paths like `/content/drive/MyDrive/...`. **These paths only exist inside a Google Colab session with Drive mounted** (`from google.colab import drive; drive.mount('/content/drive')`). If you copy these scripts to your local computer, you'll need to:
+1. Remove or comment out the `drive.mount(...)` part.
+2. Replace the `/content/drive/MyDrive/...` paths with a local path of your choice (e.g. `C:/Users/your_user/firequant_data/...`).
 
-## Descripción de cada archivo
+## File descriptions
 
-| Archivo | Entorno | Función |
+| File | Environment | Function |
 |---|---|---|
-| `main.ipynb` | Colab | Notebook principal donde se ejecutó todo el flujo de descarga, combinación de datasets y entrenamiento. |
-| `download_dfire.py` | Colab | Descarga el dataset D-Fire desde su espejo en Kaggle. |
-| `dfire_sam_to_yolo_seg.py` | Colab (GPU) | Genera pseudo-máscaras de segmentación para D-Fire usando SAM (Segment Anything Model), guiado por las cajas delimitadoras originales. |
-| `diagnostico_dfire.py`, `diagnostico_dfire_v2.py` | Colab | Scripts de depuración usados para verificar la estructura de carpetas y el emparejamiento imagen/etiqueta de D-Fire. No son necesarios para producción, se conservan como referencia del proceso. |
-| `verificar_mascaras_sa...` (`verificar_mascaras_sam.py`) | Colab | Inspección visual de la calidad de las máscaras generadas por SAM antes de usarlas en el entrenamiento. |
-| `combinar_datasets_fir...` (`combinar_datasets_firequant.py`) | Colab | Combina el dataset de Roboflow (anotado manualmente) con el de D-Fire+SAM en una sola estructura de entrenamiento YOLO-seg. |
-| `inference_firequant.py` | Colab o Local | Pipeline de inferencia: carga el modelo, calcula el Fire Percentage, clasifica la severidad y genera el mensaje de alerta. |
-| `procesar_lote_prueba...` (`procesar_lote_prueba.py`) | Colab o Local | Corre la inferencia sobre una carpeta completa de imágenes de prueba y genera una tabla resumen + imágenes anotadas. |
-| `generar_graficas_resul...` (`generar_graficas_resultados.py`) | Colab o Local | Genera las gráficas de evolución del entrenamiento (mAP, pérdidas) y de Fire Percentage por imagen. |
-| `evolucion_fp_tiempo....` (imagen) | — | Gráfica de ejemplo de Fire Percentage a lo largo del tiempo, generada por la demo de cámara. |
-| `app.py` | **Local** | Aplicación web en Streamlit: sube una imagen y visualiza la segmentación, el Fire Percentage, el nivel de severidad y la alerta. |
-| `webcam_demo_firequant.py` | **Local** | Demo en tiempo real usando la cámara del computador: procesa video en vivo, calcula FP por frame, dispara alarma visual y sonora en niveles altos, y grafica la evolución temporal al finalizar. |
-| `best.pt` | Ambos | Pesos del modelo YOLOv26n-seg ya entrenado, listo para inferencia. |
+| `main.ipynb` | Colab | Main notebook where the full flow (dataset download, dataset combination, and training) was executed. |
+| `download_dfire.py` | Colab | Downloads the D-Fire dataset from its Kaggle mirror. |
+| `dfire_sam_to_yolo_seg.py` | Colab (GPU) | Generates pseudo-segmentation masks for D-Fire using SAM (Segment Anything Model), guided by the original bounding boxes. |
+| `diagnostico_dfire.py`, `diagnostico_dfire_v2.py` | Colab | Debugging scripts used to verify D-Fire's folder structure and image/label pairing. Not required for production use; kept as a record of the process. |
+| `verificar_mascaras_sam.py` | Colab | Visual inspection of SAM-generated mask quality before using them in training. |
+| `combinar_datasets_firequant.py` | Colab | Combines the manually-annotated Roboflow dataset with the D-Fire+SAM dataset into a single YOLO-seg training structure. |
+| `inference_firequant.py` | Colab or Local | Inference pipeline: loads the model, calculates the Fire Percentage, classifies severity, and generates the alert message. |
+| `procesar_lote_prueba.py` | Colab or Local | Runs inference over a full folder of test images and generates a summary table + annotated images. |
+| `generar_graficas_resultados.py` | Colab or Local | Generates training evolution charts (mAP, losses) and Fire Percentage per image. |
+| `evolucion_fp_tiempo...` (image) | — | Example chart of Fire Percentage over time, generated by the webcam demo. |
+| `app.py` | **Local** | Streamlit web application: upload an image and visualize the segmentation, Fire Percentage, severity level, and alert. |
+| `webcam_demo_firequant.py` | **Local** | Real-time demo using the computer's webcam: processes live video, calculates FP per frame, triggers a visual and audible alarm at high severity levels, and plots the temporal evolution when finished. |
+| `best.pt` | Both | Weights of the already-trained YOLOv26n-seg model, ready for inference. |
 
-## Cómo correr las demos (local)
+## How to run the demos (local)
 
-### Requisitos
+### Requirements
 ```bash
 pip install ultralytics opencv-python matplotlib streamlit
 ```
-En Windows, la alarma sonora de `webcam_demo_firequant.py` usa `winsound` (ya incluido en Python, no requiere instalación adicional). En otros sistemas operativos, la alarma sonora se desactiva automáticamente y solo queda la alerta visual.
+On Windows, the audible alarm in `webcam_demo_firequant.py` uses `winsound` (already included with Python, no extra installation needed). On other operating systems, the audible alarm is automatically disabled and only the visual alert remains.
 
-### App web (Streamlit)
+### Web app (Streamlit)
 ```bash
 python -m streamlit run app.py
 ```
-Se abre en `http://localhost:8501`. Sube una imagen y visualiza el resultado.
+Opens at `http://localhost:8501`. Upload an image and view the result.
 
-### Demo con cámara en vivo
+### Live webcam demo
 ```bash
 python webcam_demo_firequant.py
 ```
-Apunta la cámara a una imagen o video de fuego. Presiona `q` para salir y generar la gráfica de evolución temporal.
+Point the camera at a fire image or video. Press `q` to exit and generate the temporal evolution chart.
 
-Ambos scripts esperan encontrar `best.pt` en la misma carpeta (o puedes especificar la ruta desde el panel lateral de la app, o editando la variable correspondiente en el script de la cámara).
+Both scripts expect to find `best.pt` in the same folder (or you can specify the path from the app's sidebar, or by editing the corresponding variable in the webcam script).
 
-## Dataset y metodología
+## How to test the model with new images
 
-- **Roboflow** (201 imágenes): dataset original, anotado manualmente con máscaras de segmentación.
-- **D-Fire + SAM** (5,822 imágenes): dataset público de detección de fuego (solo con cajas delimitadoras originalmente); las máscaras de segmentación se generaron automáticamente usando SAM (Segment Anything Model, Meta AI), utilizando las cajas como guía geométrica.
-- **Total combinado:** 6,023 imágenes, usadas para reentrenar YOLOv26n-seg y mitigar el overfitting observado con el dataset original de un solo video.
+`procesar_lote_prueba.py` expects a folder of test images **separate from the training dataset folders** (to honestly evaluate generalization, not images the model already saw). You need to create this folder and populate it with images before running the script.
 
-## Resultados
+### In Google Colab
+The code to upload images and create this folder is already included in `main.ipynb` (test image upload section).
 
-| Métrica (máscara, conjunto de test) | Valor |
+### Locally
+Simply create a folder (e.g. `imagenes_prueba/`) on your computer and copy the images you want to test into it (`.jpg`, `.jpeg`, or `.png` formats). Then point `carpeta_imagenes` in `procesar_lote_prueba.py` to that path.
+
+In both cases, the number of images is flexible (the project was validated with 18), but it's recommended to use varied images (day/night, different distances, different fire intensity levels) to get a representative evaluation.
+
+## Dataset and methodology
+
+- **Roboflow** (201 images): original dataset, manually annotated with segmentation masks.
+- **D-Fire + SAM** (5,822 images): public fire detection dataset (originally only bounding boxes); segmentation masks were automatically generated using SAM (Segment Anything Model, Meta AI), using the boxes as geometric guidance.
+- **Combined total:** 6,023 images, used to retrain YOLOv26n-seg and mitigate the overfitting observed with the original single-video dataset.
+
+## Results
+
+| Metric (mask, test set) | Value |
 |---|---|
 | Precision | 0.646 |
 | Recall | 0.494 |
 | mAP50 | 0.535 |
 | mAP50-95 | 0.270 |
 
-## Umbrales de severidad
+## Severity thresholds
 
-| Nivel | Rango de Fire Percentage |
+| Level | Fire Percentage range |
 |---|---|
 | Low | 0.0% – 3.0% |
 | Medium | 3.0% – 10.0% |
 | High | 10.0% – 25.0% |
 | Critical | 25.0% – 100.0% |
 
-## Limitaciones conocidas
+## Known limitations
 
-- El modelo tiende a subestimar el área de fuego en escenas panorámicas de gran escala, dado que el dataset de entrenamiento está compuesto mayormente por fuego a media distancia.
-- Las pseudo-máscaras generadas por SAM no han sido validadas cuantitativamente (IoU) contra anotación manual.
-- El módulo de análisis temporal en video (evolución del Fire Percentage a lo largo de una secuencia real, más allá de la demo de cámara) está en desarrollo.
+- The model tends to underestimate the fire area in large-scale panoramic scenes, since the training dataset is mostly composed of fire seen at medium distance.
+- SAM-generated pseudo-masks have not been quantitatively validated (IoU) against manual annotation.
+- The temporal analysis module for real video (Fire Percentage evolution over an actual sequence, beyond the webcam demo) is still under development.
 
-## Créditos
+## Credits
 
-- Modelo de segmentación: [Ultralytics YOLO26](https://github.com/ultralytics/ultralytics)
-- Generación de pseudo-máscaras: [Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything), Meta AI
-- Dataset D-Fire: espejo público en Kaggle (`sayedgamal99/smoke-fire-detection-yolo`)
+- Segmentation model: [Ultralytics YOLO26](https://github.com/ultralytics/ultralytics)
+- Pseudo-mask generation: [Segment Anything Model (SAM)](https://github.com/facebookresearch/segment-anything), Meta AI
+- D-Fire dataset: public Kaggle mirror (`sayedgamal99/smoke-fire-detection-yolo`)
