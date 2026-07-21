@@ -1,86 +1,92 @@
 """
 download_dfire.py
 
-Descarga el dataset D-Fire (imágenes + anotaciones de detección en formato
-YOLO) desde su versión espejo en Kaggle, para su posterior conversión a
-segmentación mediante SAM (Segment Anything Model).
+Downloads the D-Fire dataset (images + YOLO-format detection
+annotations) from its Kaggle mirror, for later conversion to
+segmentation via SAM (Segment Anything Model).
 
-NOTA: el repositorio oficial de GitHub (gaia-solutions-on-demand/DFireDataset)
-solo contiene código y documentación; las imágenes reales se alojan en
-OneDrive o en este espejo de Kaggle, mucho más simple de descargar en Colab.
+NOTE: the official GitHub repository (gaia-solutions-on-demand/DFireDataset)
+only contains code and documentation; the actual images are hosted on
+OneDrive or on this Kaggle mirror, which is much simpler to download
+from Colab.
 
-Convención de clases en D-Fire (confirmada por la documentación del dataset):
+D-Fire class convention (confirmed by the dataset documentation):
     class 0 = smoke
     class 1 = fire
 """
 
+import logging
 from pathlib import Path
+from typing import Optional
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
+DFIRE_FIRE_CLASS_ID = 1
+KAGGLE_DATASET_SLUG = "sayedgamal99/smoke-fire-detection-yolo"
 
 
-CLASE_FUEGO_DFIRE = 1  # class id de 'fire' en las anotaciones originales de D-Fire
-
-
-def descargar_dfire(destino: str = None) -> str:
+def download_dfire(destination: Optional[str] = None) -> str:
     """
-    Descarga la versión espejo de D-Fire alojada en Kaggle
-    ('sayedgamal99/smoke-fire-detection-yolo'), lista para usar sin
-    necesidad de OneDrive.
+    Downloads the D-Fire mirror hosted on Kaggle
+    ('sayedgamal99/smoke-fire-detection-yolo'), ready to use without
+    needing OneDrive.
 
     Args:
-        destino: Ignorado si se usa kagglehub (kagglehub gestiona su
-            propia caché local). Se mantiene por compatibilidad de firma.
+        destination: Ignored when using kagglehub (kagglehub manages its
+            own local cache). Kept for signature compatibility.
 
     Returns:
-        Ruta local donde kagglehub almacenó el dataset descargado.
+        Local path where kagglehub stored the downloaded dataset.
 
     Raises:
-        RuntimeError: Si la descarga falla (sin conexión, dataset movido,
-            o falta configurar credenciales de Kaggle).
+        RuntimeError: If the download fails (no connection, dataset
+            moved, or missing Kaggle credentials).
     """
     try:
         import kagglehub
-    except ImportError:
+    except ImportError as exc:
         raise RuntimeError(
-            "kagglehub no está instalado. Ejecuta: !pip install -q kagglehub"
-        )
+            "kagglehub is not installed. Run: !pip install -q kagglehub"
+        ) from exc
 
     try:
-        ruta = kagglehub.dataset_download("sayedgamal99/smoke-fire-detection-yolo")
+        dataset_path = kagglehub.dataset_download(KAGGLE_DATASET_SLUG)
     except Exception as exc:
-        raise RuntimeError(f"Error al descargar D-Fire desde Kaggle: {exc}") from exc
+        raise RuntimeError(f"Failed to download D-Fire from Kaggle: {exc}") from exc
 
-    print(f"D-Fire (espejo Kaggle) descargado en: {ruta}")
-    return ruta
+    logger.info("D-Fire (Kaggle mirror) downloaded to: %s", dataset_path)
+    return dataset_path
 
 
-def contar_imagenes_con_fuego(directorio_dataset: str) -> int:
+def count_fire_images(dataset_dir: str) -> int:
     """
-    Cuenta cuántas imágenes tienen al menos una anotación de clase 'fire'
-    (class_id == 1), que son las únicas relevantes para nuestro pipeline
-    de segmentación de llamas.
+    Counts how many images have at least one 'fire' class annotation
+    (class_id == 1), which are the only ones relevant for our flame
+    segmentation pipeline.
 
     Args:
-        directorio_dataset: Ruta raíz del dataset D-Fire descargado.
+        dataset_dir: Root path of the downloaded D-Fire dataset.
 
     Returns:
-        Número de imágenes con al menos una instancia de fuego anotada.
+        Number of images with at least one annotated fire instance.
     """
-    raiz = Path(directorio_dataset)
-    archivos_label = list(raiz.rglob("*.txt"))
+    root = Path(dataset_dir)
+    label_files = list(root.rglob("*.txt"))
 
-    conteo = 0
-    for archivo in archivos_label:
+    count = 0
+    for label_file in label_files:
         try:
-            contenido = archivo.read_text().strip().splitlines()
-        except Exception:
+            content = label_file.read_text().strip().splitlines()
+        except OSError:
             continue
-        if any(linea.strip().startswith(f"{CLASE_FUEGO_DFIRE} ") for linea in contenido):
-            conteo += 1
+        if any(line.strip().startswith(f"{DFIRE_FIRE_CLASS_ID} ") for line in content):
+            count += 1
 
-    print(f"Imágenes con al menos una instancia de 'fire': {conteo}")
-    return conteo
+    logger.info("Images with at least one 'fire' instance: %d", count)
+    return count
 
 
 if __name__ == "__main__":
-    ruta = descargar_dfire()
-    contar_imagenes_con_fuego(ruta)
+    dataset_path = download_dfire()
+    count_fire_images(dataset_path)

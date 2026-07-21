@@ -1,330 +1,338 @@
 """
 dfire_sam_to_yolo_seg.py
 
-Convierte las anotaciones de bounding box del dataset D-Fire (clase 'fire')
-en máscaras de segmentación pixel-level utilizando el Segment Anything
-Model (SAM), y exporta el resultado en formato YOLO-segmentation.
+Converts bounding box annotations from the D-Fire dataset (class 'fire')
+into pixel-level segmentation masks using the Segment Anything Model
+(SAM), and exports the result in YOLO-segmentation format.
 
-Metodología: para cada caja delimitadora de 'fire', se usa la caja como
-prompt geométrico para SAM, que retorna la máscara del objeto contenido
-en esa región. Este enfoque es el mismo empleado en el dataset "Boreal
-Forest Fire" (Pesonen et al., 2025) para generar máscaras de humo a
-partir de cajas humanas.
-
-Autor: FireQuant Project
+Methodology: for each 'fire' bounding box, the box is used as a
+geometric prompt for SAM, which returns the mask of the object contained
+within that region. This approach follows the same methodology used in
+the "Boreal Forest Fire" dataset (Pesonen et al., 2025) to generate
+smoke masks from human-provided boxes.
 """
 
+import logging
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import cv2
 import numpy as np
 import torch
 from segment_anything import SamPredictor, sam_model_registry
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
 
-CLASE_FUEGO_DFIRE = 1  # class_id de 'fire' en las etiquetas originales de D-Fire
-CLASE_FUEGO_SALIDA = 0  # class_id que usaremos en el dataset YOLO-seg final
-AREA_MINIMA_CONTORNO = 20
+DFIRE_FIRE_CLASS_ID = 1  # 'fire' class id in the original D-Fire annotations
+OUTPUT_FIRE_CLASS_ID = 0  # class id used in the final YOLO-seg dataset
+MIN_CONTOUR_AREA = 20
+IMAGE_EXTENSIONS = ("*.jpg", "*.png")
+PROGRESS_LOG_INTERVAL = 50
 
 
-def cargar_modelo_sam(
+def load_sam_model(
     checkpoint_path: str = "/content/sam_vit_b_01ec64.pth",
-    tipo_modelo: str = "vit_b",
+    model_type: str = "vit_b",
 ) -> SamPredictor:
     """
-    Carga el modelo SAM preentrenado y retorna un SamPredictor listo
-    para generar máscaras a partir de prompts (cajas o puntos).
+    Loads the pretrained SAM model and returns a SamPredictor ready to
+    generate masks from prompts (boxes or points).
 
     Args:
-        checkpoint_path: Ruta al checkpoint .pth de SAM. Si no existe,
-            debe descargarse previamente (ver instrucciones de uso al
-            final del archivo).
-        tipo_modelo: Variante de SAM ('vit_b', 'vit_l', 'vit_h').
-            'vit_b' es la más liviana, recomendada para Colab gratuito.
+        checkpoint_path: Path to the SAM .pth checkpoint. If it doesn't
+            exist, it must be downloaded beforehand (see usage
+            instructions at the bottom of this file).
+        model_type: SAM variant ('vit_b', 'vit_l', 'vit_h'). 'vit_b' is
+            the lightest, recommended for free Colab tiers.
 
     Returns:
-        Instancia de SamPredictor con el modelo cargado en GPU si está
-        disponible.
+        SamPredictor instance with the model loaded on GPU if available.
 
     Raises:
-        FileNotFoundError: Si el checkpoint no existe en la ruta indicada.
+        FileNotFoundError: If the checkpoint doesn't exist at the given path.
     """
     if not Path(checkpoint_path).is_file():
         raise FileNotFoundError(
-            f"No se encontró el checkpoint de SAM en: {checkpoint_path}\n"
-            "Descárgalo con:\n"
+            f"SAM checkpoint not found at: {checkpoint_path}\n"
+            "Download it with:\n"
             "!wget https://dl.fbaipublicfiles.com/segment_anything/"
             "sam_vit_b_01ec64.pth -P /content/"
         )
 
-    dispositivo = "cuda" if torch.cuda.is_available() else "cpu"
-    sam = sam_model_registry[tipo_modelo](checkpoint=checkpoint_path)
-    sam.to(device=dispositivo)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    sam = sam_model_registry[model_type](checkpoint=checkpoint_path)
+    sam.to(device=device)
 
-    print(f"SAM ({tipo_modelo}) cargado en: {dispositivo}")
+    logger.info("SAM (%s) loaded on: %s", model_type, device)
     return SamPredictor(sam)
 
 
-def leer_cajas_fuego_yolo(
-    ruta_label: str,
-    ancho_img: int,
-    alto_img: int,
+def read_fire_boxes_yolo(
+    label_path: str,
+    img_width: int,
+    img_height: int,
 ) -> List[Tuple[int, int, int, int]]:
     """
-    Lee un archivo de anotación YOLO (detección) y retorna las cajas de
-    la clase 'fire' convertidas a coordenadas de píxel (x1, y1, x2, y2).
+    Reads a YOLO detection annotation file and returns the 'fire' class
+    boxes converted to pixel coordinates (x1, y1, x2, y2).
 
     Args:
-        ruta_label: Ruta al archivo .txt de anotación YOLO.
-        ancho_img: Ancho de la imagen en píxeles.
-        alto_img: Alto de la imagen en píxeles.
+        label_path: Path to the YOLO .txt annotation file.
+        img_width: Image width in pixels.
+        img_height: Image height in pixels.
 
     Returns:
-        Lista de cajas (x1, y1, x2, y2) en píxeles, solo de la clase fuego.
+        List of (x1, y1, x2, y2) boxes in pixels, fire class only.
 
     Raises:
-        FileNotFoundError: Si el archivo de etiquetas no existe.
+        FileNotFoundError: If the label file doesn't exist.
     """
-    if not Path(ruta_label).is_file():
-        raise FileNotFoundError(f"No se encontró el archivo de anotación: {ruta_label}")
+    if not Path(label_path).is_file():
+        raise FileNotFoundError(f"Annotation file not found: {label_path}")
 
-    cajas = []
-    for linea in Path(ruta_label).read_text().strip().splitlines():
-        partes = linea.strip().split()
-        if not partes:
+    boxes = []
+    for line in Path(label_path).read_text().strip().splitlines():
+        parts = line.strip().split()
+        if not parts:
             continue
-        class_id = int(partes[0])
-        if class_id != CLASE_FUEGO_DFIRE:
+        class_id = int(parts[0])
+        if class_id != DFIRE_FIRE_CLASS_ID:
             continue
 
-        x_centro, y_centro, ancho_rel, alto_rel = map(float, partes[1:5])
-        x1 = int((x_centro - ancho_rel / 2) * ancho_img)
-        y1 = int((y_centro - alto_rel / 2) * alto_img)
-        x2 = int((x_centro + ancho_rel / 2) * ancho_img)
-        y2 = int((y_centro + alto_rel / 2) * alto_img)
-        cajas.append((max(x1, 0), max(y1, 0), min(x2, ancho_img), min(y2, alto_img)))
+        x_center, y_center, rel_width, rel_height = map(float, parts[1:5])
+        x1 = int((x_center - rel_width / 2) * img_width)
+        y1 = int((y_center - rel_height / 2) * img_height)
+        x2 = int((x_center + rel_width / 2) * img_width)
+        y2 = int((y_center + rel_height / 2) * img_height)
+        boxes.append((max(x1, 0), max(y1, 0), min(x2, img_width), min(y2, img_height)))
 
-    return cajas
+    return boxes
 
 
-def generar_mascara_con_sam(
+def generate_mask_with_sam(
     predictor: SamPredictor,
-    imagen_rgb: np.ndarray,
-    cajas: List[Tuple[int, int, int, int]],
+    image_rgb: np.ndarray,
+    boxes: List[Tuple[int, int, int, int]],
 ) -> np.ndarray:
     """
-    Genera una máscara binaria combinada usando SAM, guiado por una o
-    varias cajas delimitadoras de fuego.
+    Generates a combined binary mask using SAM, guided by one or more
+    fire bounding boxes.
 
     Args:
-        predictor: Instancia de SamPredictor con la imagen ya lista para
-            procesar (el método internamente llama a set_image).
-        imagen_rgb: Imagen en formato RGB (no BGR) como array de NumPy.
-        cajas: Lista de cajas (x1, y1, x2, y2) en píxeles.
+        predictor: SamPredictor instance ready to process the image
+            (the method internally calls set_image).
+        image_rgb: Image in RGB format (not BGR) as a NumPy array.
+        boxes: List of (x1, y1, x2, y2) boxes in pixels.
 
     Returns:
-        Máscara binaria (uint8, 0/255) del mismo tamaño que la imagen,
-        combinando todas las instancias detectadas.
+        Binary mask (uint8, 0/255) of the same size as the image,
+        combining all detected instances.
 
     Raises:
-        RuntimeError: Si SAM falla al generar alguna máscara.
+        RuntimeError: If SAM fails to generate a mask for any box.
     """
-    alto, ancho = imagen_rgb.shape[:2]
-    mascara_combinada = np.zeros((alto, ancho), dtype=np.uint8)
+    height, width = image_rgb.shape[:2]
+    combined_mask = np.zeros((height, width), dtype=np.uint8)
 
-    predictor.set_image(imagen_rgb)
+    predictor.set_image(image_rgb)
 
-    for caja in cajas:
-        caja_array = np.array(caja)
+    for box in boxes:
+        box_array = np.array(box)
         try:
-            mascaras, puntajes, _ = predictor.predict(
-                box=caja_array[None, :],
+            masks, scores, _ = predictor.predict(
+                box=box_array[None, :],
                 multimask_output=False,
             )
         except Exception as exc:
-            raise RuntimeError(f"Error al generar máscara SAM para la caja {caja}: {exc}") from exc
+            raise RuntimeError(f"Failed to generate SAM mask for box {box}: {exc}") from exc
 
-        mascara_instancia = mascaras[0].astype(np.uint8) * 255
-        mascara_combinada = np.maximum(mascara_combinada, mascara_instancia)
+        instance_mask = masks[0].astype(np.uint8) * 255
+        combined_mask = np.maximum(combined_mask, instance_mask)
 
-    return mascara_combinada
+    return combined_mask
 
 
-def mascara_a_yolo_seg(mascara: np.ndarray, class_id: int = CLASE_FUEGO_SALIDA) -> List[str]:
+def mask_to_yolo_seg(mask: np.ndarray, class_id: int = OUTPUT_FIRE_CLASS_ID) -> List[str]:
     """
-    Convierte una máscara binaria en líneas de anotación YOLO-segmentation.
+    Converts a binary mask into YOLO-segmentation annotation lines.
 
     Args:
-        mascara: Máscara binaria (0/255).
-        class_id: ID de clase a asignar en la salida.
+        mask: Binary mask (0/255).
+        class_id: Class ID to assign in the output.
 
     Returns:
-        Lista de líneas en formato "class_id x1 y1 x2 y2 ... xn yn"
-        (coordenadas normalizadas).
+        List of lines in "class_id x1 y1 x2 y2 ... xn yn" format
+        (normalized coordinates).
     """
-    alto, ancho = mascara.shape[:2]
-    contornos, _ = cv2.findContours(mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    height, width = mask.shape[:2]
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    lineas = []
-    for contorno in contornos:
-        if cv2.contourArea(contorno) < AREA_MINIMA_CONTORNO:
+    lines = []
+    for contour in contours:
+        if cv2.contourArea(contour) < MIN_CONTOUR_AREA:
             continue
-        epsilon = 0.003 * cv2.arcLength(contorno, True)
-        contorno_simplificado = cv2.approxPolyDP(contorno, epsilon, True)
-        if len(contorno_simplificado) < 3:
+        epsilon = 0.003 * cv2.arcLength(contour, True)
+        simplified_contour = cv2.approxPolyDP(contour, epsilon, True)
+        if len(simplified_contour) < 3:
             continue
 
-        puntos_norm = []
-        for punto in contorno_simplificado.reshape(-1, 2):
-            puntos_norm.extend([f"{punto[0] / ancho:.6f}", f"{punto[1] / alto:.6f}"])
-        lineas.append(f"{class_id} " + " ".join(puntos_norm))
+        normalized_points = []
+        for point in simplified_contour.reshape(-1, 2):
+            normalized_points.extend([f"{point[0] / width:.6f}", f"{point[1] / height:.6f}"])
+        lines.append(f"{class_id} " + " ".join(normalized_points))
 
-    return lineas
+    return lines
 
 
-def _resolver_ruta_label(ruta_img: Path) -> Path:
+def _resolve_label_path(image_path: Path) -> Optional[Path]:
     """
-    Determina la ruta del archivo de etiqueta (.txt) correspondiente a una
-    imagen, soportando dos convenciones comunes de estructura de dataset:
+    Determines the label (.txt) file path corresponding to an image,
+    supporting two common dataset structure conventions:
 
-    1. Label en la misma carpeta que la imagen (mismo nombre, .txt).
-    2. Label en una carpeta hermana 'labels/' (convención YOLO estándar,
-       donde las imágenes están en 'images/' y las etiquetas en 'labels/'
-       con la misma subestructura de carpetas).
+    1. Label in the same folder as the image (same name, .txt).
+    2. Label in a sibling 'labels/' folder (standard YOLO convention,
+       where images live in 'images/' and labels in 'labels/' with the
+       same subfolder structure).
 
     Args:
-        ruta_img: Ruta a la imagen.
+        image_path: Path to the image.
 
     Returns:
-        Ruta candidata al archivo .txt (puede no existir; el llamador
-        debe verificar con `.is_file()`).
+        Candidate path to the .txt file, or None if neither convention
+        yields an existing file.
     """
-    candidata_misma_carpeta = ruta_img.with_suffix(".txt")
-    if candidata_misma_carpeta.is_file():
-        return candidata_misma_carpeta
+    same_folder_candidate = image_path.with_suffix(".txt")
+    if same_folder_candidate.is_file():
+        return same_folder_candidate
 
-    # Busca reemplazando cualquier segmento 'images' por 'labels' en la ruta.
-    partes = list(ruta_img.parts)
-    partes_label = [
-        "labels" if parte.lower() == "images" else parte
-        for parte in partes
-    ]
-    candidata_carpeta_labels = Path(*partes_label).with_suffix(".txt")
-    if candidata_carpeta_labels.is_file():
-        return candidata_carpeta_labels
+    parts = list(image_path.parts)
+    label_parts = ["labels" if part.lower() == "images" else part for part in parts]
+    labels_folder_candidate = Path(*label_parts).with_suffix(".txt")
+    if labels_folder_candidate.is_file():
+        return labels_folder_candidate
 
     return None
 
 
-def procesar_dataset_dfire(
-    directorio_dfire: str,
-    directorio_salida: str,
-    predictor: SamPredictor,
-    max_imagenes: int = None,
-) -> None:
+def _collect_fire_images(root_dir: Path, max_images: Optional[int]) -> List[Path]:
     """
-    Procesa todas las imágenes de D-Fire con al menos una instancia de
-    fuego, generando sus pseudo-máscaras vía SAM y exportando el par
-    imagen+anotación en formato YOLO-seg.
+    Collects image paths that have at least one 'fire' class instance
+    in their corresponding label file, stopping early once `max_images`
+    candidates are found.
 
     Args:
-        directorio_dfire: Ruta raíz del dataset D-Fire descargado.
-        directorio_salida: Ruta donde se construirá el dataset YOLO-seg.
-        predictor: Instancia de SamPredictor ya cargada.
-        max_imagenes: Límite opcional de imágenes a procesar (útil para
-            pruebas rápidas antes de correr sobre el dataset completo).
+        root_dir: Root directory to search for images.
+        max_images: Optional cap on the number of candidates to collect.
+
+    Returns:
+        List of image paths with at least one fire annotation.
+    """
+    all_images = sorted(
+        p for pattern in IMAGE_EXTENSIONS for p in root_dir.rglob(pattern)
+    )
+
+    fire_images = []
+    for img_path in all_images:
+        label_path = _resolve_label_path(img_path)
+        if label_path is None:
+            continue
+        content = label_path.read_text().strip().splitlines()
+        if any(line.strip().startswith(f"{DFIRE_FIRE_CLASS_ID} ") for line in content):
+            fire_images.append(img_path)
+        if max_images and len(fire_images) >= max_images:
+            break
+
+    return fire_images
+
+
+def process_dfire_dataset(
+    dfire_dir: str,
+    output_dir: str,
+    predictor: SamPredictor,
+    max_images: Optional[int] = None,
+) -> None:
+    """
+    Processes all D-Fire images with at least one fire instance,
+    generating their pseudo-masks via SAM and exporting the
+    image+annotation pair in YOLO-seg format.
+
+    Args:
+        dfire_dir: Root path of the downloaded D-Fire dataset.
+        output_dir: Path where the YOLO-seg dataset will be built.
+        predictor: Already-loaded SamPredictor instance.
+        max_images: Optional cap on the number of images to process
+            (useful for quick tests before running on the full dataset).
 
     Raises:
-        FileNotFoundError: Si no se encuentran imágenes o etiquetas.
+        FileNotFoundError: If no images or labels are found.
     """
-    raiz = Path(directorio_dfire)
-    archivos_imagen = sorted(raiz.rglob("*.jpg")) + sorted(raiz.rglob("*.png"))
+    root = Path(dfire_dir)
+    all_images = sorted(p for pattern in IMAGE_EXTENSIONS for p in root.rglob(pattern))
+    if not all_images:
+        raise FileNotFoundError(f"No images found in: {dfire_dir}")
 
-    if not archivos_imagen:
-        raise FileNotFoundError(f"No se encontraron imágenes en: {directorio_dfire}")
+    fire_images = _collect_fire_images(root, max_images)
 
-    # Filtra primero las imágenes que sí tienen al menos una caja de fuego,
-    # ANTES de aplicar el límite de muestra. Sin este filtro, un límite bajo
-    # (ej. 20) puede caer por completo en un tramo del dataset sin instancias
-    # de fuego, dando 0 procesadas aunque el dataset global sí las tenga.
-    archivos_con_fuego = []
-    for ruta_img in archivos_imagen:
-        ruta_label = _resolver_ruta_label(ruta_img)
-        if ruta_label is None or not ruta_label.is_file():
-            continue
-        contenido = ruta_label.read_text().strip().splitlines()
-        if any(l.strip().startswith(f"{CLASE_FUEGO_DFIRE} ") for l in contenido):
-            archivos_con_fuego.append(ruta_img)
-        if max_imagenes and len(archivos_con_fuego) >= max_imagenes:
-            break  # ya tenemos suficientes candidatas, no hace falta seguir escaneando
+    processed, skipped, already_existed = 0, 0, 0
 
-    archivos_imagen = archivos_con_fuego
+    for img_path in fire_images:
+        base_name = img_path.stem
+        output_img = Path(output_dir) / "images" / f"{base_name}.jpg"
+        output_label = Path(output_dir) / "labels" / f"{base_name}.txt"
 
-    procesadas, omitidas, ya_existian = 0, 0, 0
-
-    for ruta_img in archivos_imagen:
-        nombre_base = ruta_img.stem
-        salida_img = Path(directorio_salida) / "images" / f"{nombre_base}.jpg"
-        salida_label = Path(directorio_salida) / "labels" / f"{nombre_base}.txt"
-
-        # Si ya se procesó en una corrida anterior (ej. tras una desconexión
-        # de Colab), se salta para no repetir trabajo ni gastar tiempo de GPU.
-        if salida_img.is_file() and salida_label.is_file():
-            ya_existian += 1
+        if output_img.is_file() and output_label.is_file():
+            already_existed += 1
             continue
 
-        ruta_label = _resolver_ruta_label(ruta_img)
+        label_path = _resolve_label_path(img_path)
 
-        imagen_bgr = cv2.imread(str(ruta_img))
-        if imagen_bgr is None:
-            omitidas += 1
+        image_bgr = cv2.imread(str(img_path))
+        if image_bgr is None:
+            skipped += 1
             continue
 
-        alto, ancho = imagen_bgr.shape[:2]
-        cajas_fuego = leer_cajas_fuego_yolo(str(ruta_label), ancho, alto)
+        height, width = image_bgr.shape[:2]
+        fire_boxes = read_fire_boxes_yolo(str(label_path), width, height)
 
-        if not cajas_fuego:
-            omitidas += 1
-            continue  # por seguridad; no debería ocurrir tras el pre-filtrado
-
-        imagen_rgb = cv2.cvtColor(imagen_bgr, cv2.COLOR_BGR2RGB)
-        mascara = generar_mascara_con_sam(predictor, imagen_rgb, cajas_fuego)
-        lineas_yolo = mascara_a_yolo_seg(mascara)
-
-        if not lineas_yolo:
-            omitidas += 1
+        if not fire_boxes:
+            skipped += 1
             continue
 
-        salida_img.parent.mkdir(parents=True, exist_ok=True)
-        salida_label.parent.mkdir(parents=True, exist_ok=True)
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        mask = generate_mask_with_sam(predictor, image_rgb, fire_boxes)
+        yolo_lines = mask_to_yolo_seg(mask)
 
-        cv2.imwrite(str(salida_img), imagen_bgr)
-        salida_label.write_text("\n".join(lineas_yolo))
+        if not yolo_lines:
+            skipped += 1
+            continue
 
-        procesadas += 1
-        if procesadas % 50 == 0:
-            print(f"Procesadas: {procesadas} | Omitidas: {omitidas} | Ya existían: {ya_existian}")
+        output_img.parent.mkdir(parents=True, exist_ok=True)
+        output_label.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nProceso finalizado. Total procesadas: {procesadas} | Omitidas: {omitidas} | "
-          f"Ya existían (saltadas): {ya_existian}")
-    print(f"Dataset generado en: {directorio_salida}")
+        cv2.imwrite(str(output_img), image_bgr)
+        output_label.write_text("\n".join(yolo_lines))
+
+        processed += 1
+        if processed % PROGRESS_LOG_INTERVAL == 0:
+            logger.info(
+                "Processed: %d | Skipped: %d | Already existed: %d",
+                processed, skipped, already_existed,
+            )
+
+    logger.info(
+        "Done. Total processed: %d | Skipped: %d | Already existed (resumed): %d",
+        processed, skipped, already_existed,
+    )
+    logger.info("Dataset generated at: %s", output_dir)
 
 
 if __name__ == "__main__":
-    # ------------------------------------------------------------------
-    # Instrucciones previas (ejecutar en Colab antes de este script):
-    #
-    # !pip install -q git+https://github.com/facebookresearch/segment-anything.git
-    # !wget -q https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth -P /content/
-    # ------------------------------------------------------------------
+    sam_predictor = load_sam_model(checkpoint_path="/content/sam_vit_b_01ec64.pth")
 
-    predictor_sam = cargar_modelo_sam(checkpoint_path="/content/sam_vit_b_01ec64.pth")
-
-    # Prueba rápida con pocas imágenes antes de correr el dataset completo.
-    procesar_dataset_dfire(
-        directorio_dfire="/content/DFireDataset",
-        directorio_salida="/content/dfire_yolo_seg",
-        predictor=predictor_sam,
-        max_imagenes=20,  # quitar este límite (o subirlo) tras validar resultados
+    process_dfire_dataset(
+        dfire_dir="/content/DFireDataset",
+        output_dir="/content/dfire_yolo_seg",
+        predictor=sam_predictor,
+        max_images=20,
     )
